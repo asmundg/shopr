@@ -1,0 +1,17 @@
+{
+  "name": "shopr",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^0.19.2",
+    "axios-debug-log": "^0.7.0",
+    "debug": "^4.1.1",
+    "elo-rank": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/elo-rank": "^1.0.0",
+    "@types/node": "^13.13.4",
+    "typescript": "^3.8.3"
+  }
+}
