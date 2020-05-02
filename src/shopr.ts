@@ -21,6 +21,7 @@ interface Scores {
 }
 
 const DEFAULT_SCORE = 1000;
+const UNSORTED_TAG = " [unsorted]";
 
 // Get trello client
 function client(prefs: Prefs): TrelloClient {
@@ -80,6 +81,10 @@ async function resetLabel(
   }
 }
 
+function lookup(scores: Scores, name: string): number {
+  return scores[name.toLowerCase()] ?? DEFAULT_SCORE;
+}
+
 // Order list according to score
 async function orderList(
   client: TrelloClient,
@@ -99,13 +104,20 @@ async function orderList(
       for (const checklistItem of checklist.checkItems) {
         logger(checklistItem);
         // Avoid negative pos values
-        const pos = (scores[checklistItem.name] ?? DEFAULT_SCORE) + 100000;
+        const pos = lookup(scores, checklistItem.name) + 100000;
         if (checklistItem.pos != pos) {
           await client.updateChecklistItem(
             card.id,
             idChecklist,
             checklistItem.id,
-            { ...checklistItem, pos }
+            {
+              ...checklistItem,
+              name:
+                scores[checklistItem.name.toLowerCase()] != undefined
+                  ? checklistItem.name
+                  : `${checklistItem.name}${UNSORTED_TAG}`,
+              pos,
+            }
           );
         }
       }
@@ -123,22 +135,25 @@ function train(list: Checklist, oldScores: Readonly<Scores>): Scores {
   const scores: Scores = { ...oldScores };
 
   list.checkItems.forEach((current) => {
-    const currentScore = scores[current.name] ?? DEFAULT_SCORE;
+    const currentName = current.name.replace(UNSORTED_TAG, "").toLowerCase();
+
+    const currentScore = lookup(scores, currentName);
     list.checkItems.forEach((compare) => {
       // Same object
       if (current.pos === compare.pos) {
         return;
       }
 
+      const compareName = compare.name.replace(UNSORTED_TAG, "").toLowerCase();
       // Lower score means earlier in the sequence, to match Trello's
       // ordering
-      const compareScore = scores[compare.name] ?? DEFAULT_SCORE;
-      scores[current.name] = elo.updateRating(
+      const compareScore = lookup(scores, compareName);
+      scores[currentName] = elo.updateRating(
         elo.getExpected(currentScore, compareScore),
         current.pos < compare.pos ? 0 : 1,
         currentScore
       );
-      scores[compare.name] = elo.updateRating(
+      scores[compareName] = elo.updateRating(
         elo.getExpected(compareScore, currentScore),
         compare.pos < current.pos ? 0 : 1,
         compareScore
