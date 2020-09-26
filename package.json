@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
+  "author": "Åsmund Grammeltvedt <asmundg@big-oil.org>",
   "dependencies": {
     "axios": "^0.19.2",
     "axios-debug-log": "^0.7.0",
