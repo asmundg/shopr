@@ -22,7 +22,7 @@ interface Scores {
 
 const DEFAULT_SCORE = 1000;
 const UNSORTED_TAG = " [unsorted]";
-const UNSORTED_RE = /( [unsorted])+/;
+const UNSORTED_RE = /( \[unsorted\])+/;
 const NR_RE = /^(\d)+ /;
 
 // Get trello client
@@ -83,17 +83,16 @@ async function resetLabel(
   }
 }
 
+function lookupName(name: string): string {
+  return name.toLowerCase().replace(UNSORTED_RE, "").replace(NR_RE, "");
+}
+
 function lookup(scores: Scores, name: string): number {
-  return (
-    scores[name.toLowerCase().replace(UNSORTED_RE, "").replace(NR_RE, "")] ??
-    DEFAULT_SCORE
-  );
+  return scores[lookupName(name)] ?? DEFAULT_SCORE;
 }
 
 function update(scores: Scores, name: string, score: number): void {
-  scores[
-    name.toLowerCase().replace(UNSORTED_RE, "").replace(NR_RE, "")
-  ] = score;
+  scores[lookupName(name)] = score;
 }
 
 // Order list according to score
@@ -117,7 +116,7 @@ async function orderList(
         // Avoid negative pos values
         const pos = lookup(scores, checklistItem.name) + 100000;
         if (checklistItem.pos != pos) {
-          if (scores[checklistItem.name.toLowerCase()] != undefined) {
+          if (scores[lookupName(checklistItem.name)] == undefined) {
             logger(`Unknown item ${checklistItem.name}`);
           }
 
@@ -128,7 +127,8 @@ async function orderList(
             {
               ...checklistItem,
               name:
-                scores[checklistItem.name.toLowerCase()] != undefined
+                scores[lookupName(checklistItem.name)] != undefined ||
+                checklistItem.name.match(UNSORTED_RE)
                   ? checklistItem.name
                   : `${checklistItem.name}${UNSORTED_TAG}`,
               pos,
