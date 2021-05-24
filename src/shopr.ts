@@ -84,7 +84,12 @@ async function resetLabel(
 }
 
 function lookupName(name: string): string {
-  return name.toLowerCase().replace(UNSORTED_RE, "").replace(FLUFF_RE, "");
+  const stripped = name
+    .toLowerCase()
+    .replace(UNSORTED_RE, "")
+    .replace(FLUFF_RE, "");
+  logger(`Lookup ${name} => ${stripped}`);
+  return stripped;
 }
 
 function lookup(scores: Scores, name: string): number {
