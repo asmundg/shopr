@@ -22,8 +22,8 @@ interface Scores {
 
 const DEFAULT_SCORE = 1000;
 const UNSORTED_TAG = " [unsorted]";
-const UNSORTED_RE = /( \[unsorted\])+/;
-const NR_RE = /^(\d)+ /;
+const UNSORTED_RE = /\[unsorted\]/g;
+const FLUFF_RE = /\d /g;
 
 // Get trello client
 function client(prefs: Prefs): TrelloClient {
@@ -84,7 +84,7 @@ async function resetLabel(
 }
 
 function lookupName(name: string): string {
-  return name.toLowerCase().replace(UNSORTED_RE, "").replace(NR_RE, "");
+  return name.toLowerCase().replace(UNSORTED_RE, "").replace(FLUFF_RE, "");
 }
 
 function lookup(scores: Scores, name: string): number {
