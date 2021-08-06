@@ -23,7 +23,6 @@ interface Scores {
 const DEFAULT_SCORE = 1000;
 const UNSORTED_TAG = " [unsorted]";
 const UNSORTED_RE = /\[unsorted\]/g;
-const FLUFF_RE = /\d /g;
 
 // Get trello client
 function client(prefs: Prefs): TrelloClient {
@@ -83,21 +82,48 @@ async function resetLabel(
   }
 }
 
-function lookupName(name: string): string {
+// Strip completely useless stuff, like the unsorted tag and
+// numbers. Then break into words and return an array of candidates
+// for the item identifier.
+function lookupCandidates(name: string): string[] {
   const stripped = name
     .toLowerCase()
     .replace(UNSORTED_RE, "")
-    .replace(FLUFF_RE, "");
-  logger(`Lookup ${name} => ${stripped}`);
-  return stripped;
+    .replace(/[\d\(\)]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const candidates = stripped.split(" ").sort();
+  logger(`Lookup ${name} => ${candidates}`);
+  return candidates;
 }
 
 function lookup(scores: Scores, name: string): number {
-  return scores[lookupName(name)] ?? DEFAULT_SCORE;
+  const candidates = lookupCandidates(name);
+
+  // Use longest word as preferred identifier, if we don't find an
+  // exact match. This is not the best heuristic. It would be useful
+  // to be able to strip off adjectives and concentrate on nouns.
+  const candidate = [candidates.join(","), ...candidates]
+    .filter((c) => !!scores[c])
+    .reduce(
+      (leader, candidate) =>
+        candidate.length > leader.length ? candidate : leader,
+      ""
+    );
+  logger(`Lookup ${name} => final candidate ${candidate}`);
+  return scores[candidate] ?? DEFAULT_SCORE;
 }
 
 function update(scores: Scores, name: string, score: number): void {
-  scores[lookupName(name)] = score;
+  const candidates = lookupCandidates(name);
+  // Save the score for all words in the item, as well as the full
+  // string. This will cause us to score some irrelevant words, but
+  // should provide a better chance of reusing knowledge when looking
+  // for variations on the same thing (e.g. "beans" in "beans,white"
+  // and "beans","green" (yes, the adjectives here are the same length
+  // and can therefore be selected when we don't have the full string
+  // in the score list)).
+  [candidates.join(","), ...candidates].forEach((c) => (scores[c] = score));
 }
 
 // Order list according to score
@@ -121,10 +147,6 @@ async function orderList(
         // Avoid negative pos values
         const pos = lookup(scores, checklistItem.name) + 100000;
         if (checklistItem.pos != pos) {
-          if (scores[lookupName(checklistItem.name)] == undefined) {
-            logger(`Unknown item ${checklistItem.name}`);
-          }
-
           await client.updateChecklistItem(
             card.id,
             idChecklist,
@@ -132,8 +154,8 @@ async function orderList(
             {
               ...checklistItem,
               name:
-                scores[lookupName(checklistItem.name)] != undefined ||
-                checklistItem.name.match(UNSORTED_RE)
+                scores[lookupCandidates(checklistItem.name).join(",")] !=
+                  undefined || checklistItem.name.match(UNSORTED_RE)
                   ? checklistItem.name
                   : `${checklistItem.name}${UNSORTED_TAG}`,
               pos,
