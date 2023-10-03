@@ -7,7 +7,7 @@
   "dependencies": {
     "axios": "^0.21.1",
     "axios-debug-log": "^0.7.0",
-    "debug": "^4.1.1",
+    "debug": "^4.3.1",
     "elo-rank": "^1.0.4"
   },
   "devDependencies": {
