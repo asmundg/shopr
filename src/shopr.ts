@@ -14,6 +14,9 @@ interface Prefs {
   board: string;
   trainLabel: string;
   orderLabel: string;
+  populateLabel: string;
+  availableList: string;
+  selectedList: string;
 }
 
 interface Scores {
@@ -170,6 +173,86 @@ async function orderList(
   }
 }
 
+// Populate shopping list from selected recipes
+async function populateShoppingList(
+  client: TrelloClient,
+  prefs: Prefs
+): Promise<void> {
+  // Get all cards on the board
+  const cards = await client.getBoardCards(prefs.board);
+  
+  // Find cards with the populate label
+  for (const card of cards) {
+    if (!card.labels.find((l) => l.name === prefs.populateLabel)) {
+      continue;
+    }
+
+    logger(`Populating shopping list from ${card.name}`);
+    
+    // Get cards from the selected recipes list
+    const selectedRecipes = await client.getListCards(prefs.selectedList);
+    logger(`Found ${selectedRecipes.length} selected recipes`);
+    
+    // Keep track of items we've already added to avoid duplicates
+    const addedItems = new Set<string>();
+    
+    // Get or create a checklist on the populate card
+    let targetChecklistId: string;
+    if (card.idChecklists.length === 0) {
+      // Create a new checklist if one doesn't exist
+      logger(`Creating new checklist on card ${card.name}`);
+      const newChecklist = await client.createChecklist(card.id, "Shopping List");
+      targetChecklistId = newChecklist.id;
+    } else {
+      // Use the first existing checklist
+      targetChecklistId = card.idChecklists[0];
+    }
+    
+    // For each recipe card in the selected list
+    for (const recipeCard of selectedRecipes) {
+      logger(`Processing recipe: ${recipeCard.name}`);
+      
+      // Get all checklists on the recipe card
+      for (const idChecklist of recipeCard.idChecklists) {
+        const checklist = await client.getChecklist(idChecklist);
+        
+        // Copy each item from the recipe checklist to the populate card's checklist
+        for (const checklistItem of checklist.checkItems) {
+          // Skip if we've already added this item (prevent duplicates)
+          if (addedItems.has(checklistItem.name.toLowerCase())) {
+            logger(`Skipping duplicate item: ${checklistItem.name}`);
+            continue;
+          }
+          
+          // Add the item to the populate card's checklist
+          await client.addChecklistItem(targetChecklistId, checklistItem.name);
+          addedItems.add(checklistItem.name.toLowerCase());
+          logger(`Added item: ${checklistItem.name}`);
+        }
+      }
+      
+      // Move the recipe card back to the available recipes list
+      await client.moveCardToList(recipeCard.id, prefs.availableList);
+      logger(`Moved recipe ${recipeCard.name} back to available list`);
+    }
+    
+    // Remove the populate label when done
+    await resetLabel(client, prefs.populateLabel, [card.id]);
+    logger(`Populating ${card.name} done`);
+  }
+}
+
+// Utility function to print all lists on a board
+async function listBoardLists(client: TrelloClient, prefs: Prefs): Promise<void> {
+  try {
+    const lists = await client.getBoardLists(prefs.board);
+    console.log("Available lists on your board:");
+    console.log(JSON.stringify(lists, null, 2));
+  } catch (error) {
+    console.error("Error fetching board lists:", error);
+  }
+}
+
 function train(list: Checklist, oldScores: Readonly<Scores>): Scores {
   logger(`Training on ${list.checkItems.length} items`);
   var elo = new EloRank();
@@ -214,6 +297,13 @@ function train(list: Checklist, oldScores: Readonly<Scores>): Scores {
 async function main() {
   const prefs = JSON.parse(fs.readFileSync(".trello.json", "utf-8")) as Prefs;
   const c = client(prefs);
+  
+  // Check for command line arguments
+  if (process.argv.includes("--list-ids")) {
+    await listBoardLists(c, prefs);
+    return;
+  }
+  
   const checkLists = await trainSet(c, prefs);
 
   const scores = fs.existsSync("scores.json")
@@ -231,6 +321,7 @@ async function main() {
     checkLists.map((c) => c.idCard)
   );
   await orderList(c, scores, prefs);
+  await populateShoppingList(c, prefs);
 }
 
 main();

@@ -212,10 +212,55 @@ export const trello = (opts: {
         data
       ),
 
+    // Add a checklist item to a checklist
+    addChecklistItem: (
+      idChecklist: string,
+      name: string,
+      pos?: number
+    ) =>
+      makeRequest(
+        "post",
+        `${root}/1/checklists/${idChecklist}/checkItems`,
+        { key, token },
+        { name, pos }
+      ) as Promise<ChecklistItem>,
+
+    // Get cards in a specific list
+    getListCards: (idList: string) =>
+      makeRequest("get", `${root}/1/lists/${idList}/cards`, {
+        key,
+        token,
+      }) as Promise<Card[]>,
+
+    // Move a card to a different list
+    moveCardToList: (idCard: string, idList: string) =>
+      makeRequest(
+        "put",
+        `${root}/1/cards/${idCard}`,
+        { key, token },
+        { idList }
+      ),
+
     removeLabel: (idCard: string, idLabel: string) =>
       makeRequest("delete", `${root}/1/cards/${idCard}/idLabels/${idLabel}`, {
         key,
         token,
       }),
+
+    // Get all lists on a board
+    getBoardLists: (idBoard: string) =>
+      makeRequest("get", `${root}/1/boards/${idBoard}/lists`, {
+        key,
+        token,
+      }),
+
+    // Create a new checklist on a card
+    createChecklist: (idCard: string, name: string = "Checklist") =>
+      makeRequest(
+        "post",
+        `${root}/1/cards/${idCard}/checklists`,
+        { key, token },
+        { name }
+      ) as Promise<Checklist>,
   };
 };
