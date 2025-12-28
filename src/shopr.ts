@@ -176,7 +176,7 @@ async function orderList(
 // Parse item name to extract base name and quantity
 // e.g., "eggs 2" -> { base: "eggs", quantity: 2 }
 // e.g., "eggs" -> { base: "eggs", quantity: 1 }
-function parseItemName(name: string): { base: string; quantity: number } {
+export function parseItemName(name: string): { base: string; quantity: number } {
   const trimmed = name.trim();
   const match = trimmed.match(/^(.+?)\s+(\d+)$/);
 
@@ -196,7 +196,7 @@ function parseItemName(name: string): { base: string; quantity: number } {
 // Format item name with quantity
 // e.g., { base: "eggs", quantity: 3 } -> "eggs 3"
 // e.g., { base: "eggs", quantity: 1 } -> "eggs"
-function formatItemName(base: string, quantity: number): string {
+export function formatItemName(base: string, quantity: number): string {
   if (quantity === 1) {
     return base;
   }
@@ -400,4 +400,7 @@ async function main() {
   await populateShoppingList(c, prefs);
 }
 
-main();
+// Only run main if this file is executed directly (not imported)
+if (require.main === module) {
+  main();
+}
