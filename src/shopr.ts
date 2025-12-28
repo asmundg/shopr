@@ -6,7 +6,7 @@ import "axios-debug-log";
 
 const logger = debug("shopr:trelloClient");
 
-import { trello, Checklist, TrelloClient } from "./trello";
+import { trello, Checklist, ChecklistItem, TrelloClient } from "./trello";
 
 interface Prefs {
   token: string;
@@ -173,6 +173,36 @@ async function orderList(
   }
 }
 
+// Parse item name to extract base name and quantity
+// e.g., "eggs 2" -> { base: "eggs", quantity: 2 }
+// e.g., "eggs" -> { base: "eggs", quantity: 1 }
+function parseItemName(name: string): { base: string; quantity: number } {
+  const trimmed = name.trim();
+  const match = trimmed.match(/^(.+?)\s+(\d+)$/);
+
+  if (match) {
+    return {
+      base: match[1].trim(),
+      quantity: parseInt(match[2], 10)
+    };
+  }
+
+  return {
+    base: trimmed,
+    quantity: 1
+  };
+}
+
+// Format item name with quantity
+// e.g., { base: "eggs", quantity: 3 } -> "eggs 3"
+// e.g., { base: "eggs", quantity: 1 } -> "eggs"
+function formatItemName(base: string, quantity: number): string {
+  if (quantity === 1) {
+    return base;
+  }
+  return `${base} ${quantity}`;
+}
+
 // Populate shopping list from selected recipes
 async function populateShoppingList(
   client: TrelloClient,
@@ -188,14 +218,11 @@ async function populateShoppingList(
     }
 
     logger(`Populating shopping list from ${card.name}`);
-    
+
     // Get cards from the selected recipes list
     const selectedRecipes = await client.getListCards(prefs.selectedList);
     logger(`Found ${selectedRecipes.length} selected recipes`);
-    
-    // Keep track of items we've already added to avoid duplicates
-    const addedItems = new Set<string>();
-    
+
     // Get or create a checklist on the populate card
     let targetChecklistId: string;
     if (card.idChecklists.length === 0) {
@@ -207,33 +234,82 @@ async function populateShoppingList(
       // Use the first existing checklist
       targetChecklistId = card.idChecklists[0];
     }
-    
+
+    // Get existing items from the target checklist
+    const targetChecklist = await client.getChecklist(targetChecklistId);
+
+    // Build a map of existing items: normalized base name -> { item, parsed }
+    const existingItems = new Map<string, { item: ChecklistItem; parsed: ReturnType<typeof parseItemName> }>();
+    for (const item of targetChecklist.checkItems) {
+      const parsed = parseItemName(item.name);
+      const normalizedBase = parsed.base.toLowerCase();
+      existingItems.set(normalizedBase, { item, parsed });
+      logger(`Existing item: ${item.name} -> base: "${parsed.base}", quantity: ${parsed.quantity}`);
+    }
+
+    // Track items we're adding in this run
+    // Also keep the original base name (with proper casing) for each item
+    const newQuantities = new Map<string, number>();
+    const originalBaseNames = new Map<string, string>();
+
     // For each recipe card in the selected list
     for (const recipeCard of selectedRecipes) {
       logger(`Processing recipe: ${recipeCard.name}`);
-      
+
       // Get all checklists on the recipe card
       for (const idChecklist of recipeCard.idChecklists) {
         const checklist = await client.getChecklist(idChecklist);
-        
+
         // Copy each item from the recipe checklist to the populate card's checklist
         for (const checklistItem of checklist.checkItems) {
-          // Skip if we've already added this item (prevent duplicates)
-          if (addedItems.has(checklistItem.name.toLowerCase())) {
-            logger(`Skipping duplicate item: ${checklistItem.name}`);
-            continue;
+          const parsed = parseItemName(checklistItem.name);
+          const normalizedBase = parsed.base.toLowerCase();
+
+          // Add to the running total for this item
+          const currentNew = newQuantities.get(normalizedBase) || 0;
+          newQuantities.set(normalizedBase, currentNew + parsed.quantity);
+
+          // Store the original base name (first occurrence wins for casing)
+          if (!originalBaseNames.has(normalizedBase)) {
+            originalBaseNames.set(normalizedBase, parsed.base);
           }
-          
-          // Add the item to the populate card's checklist
-          await client.addChecklistItem(targetChecklistId, checklistItem.name);
-          addedItems.add(checklistItem.name.toLowerCase());
-          logger(`Added item: ${checklistItem.name}`);
+
+          logger(`Processing item: ${checklistItem.name} -> base: "${parsed.base}", quantity: ${parsed.quantity}`);
         }
       }
-      
+
       // Move the recipe card back to the available recipes list
       await client.moveCardToList(recipeCard.id, prefs.availableList);
       logger(`Moved recipe ${recipeCard.name} back to available list`);
+    }
+
+    // Now merge the new quantities with existing items
+    for (const [normalizedBase, newQty] of newQuantities.entries()) {
+      const existing = existingItems.get(normalizedBase);
+
+      if (existing) {
+        // Item already exists - update the quantity
+        const totalQty = existing.parsed.quantity + newQty;
+        const updatedName = formatItemName(existing.parsed.base, totalQty);
+
+        logger(`Merging item: ${existing.item.name} + ${newQty} -> ${updatedName}`);
+
+        await client.updateChecklistItem(
+          card.id,
+          targetChecklistId,
+          existing.item.id,
+          {
+            ...existing.item,
+            name: updatedName
+          }
+        );
+      } else {
+        // New item - add it to the checklist
+        const originalBaseName = originalBaseNames.get(normalizedBase) || normalizedBase;
+        const newName = formatItemName(originalBaseName, newQty);
+        logger(`Adding new item: ${newName}`);
+        await client.addChecklistItem(targetChecklistId, newName);
+      }
     }
     
     // Remove the populate label when done
