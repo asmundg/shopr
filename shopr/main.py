@@ -254,6 +254,43 @@ async def order_list(
         await reset_label(client, prefs.order_label, [card.id])
 
 
+def parse_item_quantity(item_name: str) -> tuple[str, int]:
+    """Parse an item name to extract base name and quantity.
+
+    Examples:
+        "eggs" -> ("eggs", 1)
+        "eggs 2" -> ("eggs", 2)
+        "milk 3" -> ("milk", 3)
+
+    Args:
+        item_name: The item name, optionally with quantity at the end
+
+    Returns:
+        Tuple of (base_name, quantity)
+    """
+    parts = item_name.strip().rsplit(maxsplit=1)
+
+    if len(parts) == 2 and parts[1].isdigit():
+        return (parts[0], int(parts[1]))
+
+    return (item_name.strip(), 1)
+
+
+def format_item_with_quantity(base_name: str, quantity: int) -> str:
+    """Format an item name with quantity.
+
+    Args:
+        base_name: The base item name
+        quantity: The quantity
+
+    Returns:
+        Formatted item name (e.g., "eggs 3" if quantity > 1, "eggs" if quantity == 1)
+    """
+    if quantity > 1:
+        return f"{base_name} {quantity}"
+    return base_name
+
+
 async def populate_shopping_list(
     client: TrelloClient,
     prefs: Prefs,
@@ -282,8 +319,9 @@ async def populate_shopping_list(
         selected_recipes = await client.get_list_cards(prefs.selected_list)
         logger.info(f"Found {len(selected_recipes)} selected recipes")
 
-        # Keep track of items we've already added to avoid duplicates
-        added_items: set[str] = set()
+        # Keep track of items and their quantities to merge duplicates
+        # Maps lowercase base name -> (original_base_name, total_quantity)
+        item_data: dict[str, tuple[str, int]] = {}
 
         # Get or create a checklist on the populate card
         if not card.idChecklists:
@@ -305,21 +343,34 @@ async def populate_shopping_list(
 
                 # Copy each item from the recipe checklist to the populate card's checklist
                 for checklist_item in checklist.checkItems:
-                    # Skip if we've already added this item (prevent duplicates)
-                    item_lower = checklist_item.name.lower()
-                    if item_lower in added_items:
-                        logger.debug(f"Skipping duplicate item: {checklist_item.name}")
-                        continue
+                    # Parse the item to extract base name and quantity
+                    base_name, quantity = parse_item_quantity(checklist_item.name)
+                    base_name_lower = base_name.lower()
 
-                    # Add the item to the populate card's checklist
-                    await client.add_checklist_item(
-                        target_checklist_id,
-                        checklist_item.name
-                    )
-                    added_items.add(item_lower)
-                    logger.debug(f"Added item: {checklist_item.name}")
+                    # Merge quantities for duplicate items
+                    if base_name_lower in item_data:
+                        original_name, existing_quantity = item_data[base_name_lower]
+                        item_data[base_name_lower] = (original_name, existing_quantity + quantity)
+                        logger.debug(
+                            f"Merging duplicate item: {checklist_item.name} "
+                            f"(total quantity now: {existing_quantity + quantity})"
+                        )
+                    else:
+                        item_data[base_name_lower] = (base_name, quantity)
+                        logger.debug(f"Added item: {checklist_item.name}")
 
-            # Move the recipe card back to the available recipes list
+        # Add all items with their merged quantities to the checklist
+        for original_name, total_quantity in item_data.values():
+            # Preserve the original casing of the first occurrence
+            formatted_name = format_item_with_quantity(original_name, total_quantity)
+            await client.add_checklist_item(
+                target_checklist_id,
+                formatted_name
+            )
+            logger.debug(f"Added merged item: {formatted_name}")
+
+        # Move recipe cards back to the available recipes list
+        for recipe_card in selected_recipes:
             await client.move_card_to_list(recipe_card.id, prefs.available_list)
             logger.info(f"Moved recipe {recipe_card.name} back to available list")
 
