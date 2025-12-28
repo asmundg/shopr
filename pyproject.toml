@@ -1,0 +1,19 @@
+[project]
+name = "shopr"
+version = "1.0.0"
+description = "Trello-based shopping list sorter"
+authors = [
+    {name = "Åsmund Grammeltvedt", email = "asmundg@big-oil.org"}
+]
+license = {text = "MIT"}
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+]
+
+[build-system]
+requires = ["setuptools>=75.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["shopr"]
