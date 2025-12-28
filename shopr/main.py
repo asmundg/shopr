@@ -5,18 +5,15 @@ import json
 import logging
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from .elo import EloRank
 from .trello import (
-    Card,
     Checklist,
     ChecklistItem,
     TrelloClient,
-    create_trello_client,
 )
 
 
@@ -29,9 +26,21 @@ logger = logging.getLogger("shopr:trelloClient")
 
 
 # Constants
-DEFAULT_SCORE = 1000
+DEFAULT_SCORE = 1000.0
 UNSORTED_TAG = " [unsorted]"
 UNSORTED_RE = re.compile(r"\[unsorted\]")
+
+
+# Type alias for scores
+Scores = defaultdict[str, float]
+
+
+def make_scores(data: dict[str, float] | None = None) -> Scores:
+    """Create a scores defaultdict with DEFAULT_SCORE as default."""
+    scores: Scores = defaultdict(lambda: DEFAULT_SCORE)
+    if data:
+        scores.update(data)
+    return scores
 
 
 class Prefs:
@@ -49,59 +58,6 @@ class Prefs:
         self.selected_list: str = data["selectedList"]
 
 
-class Scores:
-    """Score storage for items."""
-
-    def __init__(self, data: dict[str, float] | None = None):
-        """Initialize scores from dictionary."""
-        self._scores: dict[str, float] = data or {}
-
-    def get(self, key: str, default: float = DEFAULT_SCORE) -> float:
-        """Get score for a key."""
-        return self._scores.get(key, default)
-
-    def set(self, key: str, value: float) -> None:
-        """Set score for a key."""
-        self._scores[key] = value
-
-    def to_dict(self) -> dict[str, float]:
-        """Convert to dictionary."""
-        return self._scores.copy()
-
-
-async def make_request(
-    method: str,
-    url: str,
-    params: dict[str, Any],
-    data: Any = None,
-) -> dict[str, Any]:
-    """Make an HTTP request using httpx.
-
-    Args:
-        method: HTTP method (get, post, put, delete)
-        url: URL to request
-        params: Query parameters
-        data: Request body data
-
-    Returns:
-        Response data as dictionary
-    """
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.request(
-                method=method.upper(),
-                url=url,
-                params=params,
-                json=data,
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.HTTPError as err:
-            logger.error(f"HTTP error: {err}")
-            if hasattr(err, "response") and err.response is not None:
-                logger.error(f"Response data: {err.response.text}")
-            raise
-
 
 def create_client(prefs: Prefs) -> TrelloClient:
     """Create a Trello client from preferences.
@@ -112,11 +68,7 @@ def create_client(prefs: Prefs) -> TrelloClient:
     Returns:
         TrelloClient instance
     """
-    return create_trello_client(
-        key=prefs.key,
-        token=prefs.token,
-        make_request=make_request,
-    )
+    return TrelloClient(key=prefs.key, token=prefs.token)
 
 
 async def get_train_set(
@@ -212,7 +164,7 @@ def lookup(scores: Scores, name: str) -> float:
     all_candidates = [full_key] + candidates
 
     # Filter candidates that have scores
-    scored_candidates = [c for c in all_candidates if scores.get(c, None) is not None]
+    scored_candidates = [c for c in all_candidates if c in scores]
 
     if not scored_candidates:
         return DEFAULT_SCORE
@@ -220,7 +172,7 @@ def lookup(scores: Scores, name: str) -> float:
     # Find longest candidate
     candidate = max(scored_candidates, key=len, default="")
     logger.debug(f"Lookup {name} => final candidate {candidate}")
-    return scores.get(candidate, DEFAULT_SCORE)
+    return scores[candidate]
 
 
 def update(scores: Scores, name: str, score: float) -> None:
@@ -235,7 +187,7 @@ def update(scores: Scores, name: str, score: float) -> None:
     # Save score for all words in the item, as well as the full string
     full_key = ",".join(candidates)
     for candidate in [full_key] + candidates:
-        scores.set(candidate, score)
+        scores[candidate] = score
 
 
 async def order_list(
@@ -275,7 +227,7 @@ async def order_list(
                     # Determine if item should have unsorted tag
                     candidates = lookup_candidates(checklist_item.name)
                     full_key = ",".join(candidates)
-                    has_score = scores.get(full_key, None) is not None
+                    has_score = full_key in scores
                     has_unsorted_tag = bool(UNSORTED_RE.search(checklist_item.name))
 
                     new_name = checklist_item.name
@@ -284,14 +236,11 @@ async def order_list(
 
                     # Create updated checklist item
                     updated_item = ChecklistItem(
-                        idChecklist=checklist_item.idChecklist,
-                        state=checklist_item.state,
-                        idMember=checklist_item.idMember,
                         id=checklist_item.id,
+                        idChecklist=checklist_item.idChecklist,
                         name=new_name,
-                        nameData=checklist_item.nameData,
                         pos=pos,
-                        due=checklist_item.due,
+                        state=checklist_item.state,
                     )
 
                     await client.update_checklist_item(
@@ -407,7 +356,7 @@ def train(checklist: Checklist, old_scores: Scores) -> Scores:
     logger.info(f"Training on {len(checklist.checkItems)} items")
 
     # Create new scores dict from old scores
-    scores = Scores(old_scores.to_dict())
+    scores = make_scores(dict(old_scores))
 
     # Create ELO ranking system
     elo = EloRank()
@@ -474,16 +423,16 @@ async def main() -> None:
     scores_path = Path("scores.json")
     if scores_path.exists():
         scores_data = json.loads(scores_path.read_text())
-        scores = Scores(scores_data)
+        scores = make_scores(scores_data)
     else:
-        scores = Scores()
+        scores = make_scores()
 
     # Train on all checklists
     for checklist in checklists:
         scores = train(checklist, scores)
 
     # Save scores
-    scores_path.write_text(json.dumps(scores.to_dict(), indent=2))
+    scores_path.write_text(json.dumps(dict(scores), indent=2))
 
     # Reset training labels
     await reset_label(
