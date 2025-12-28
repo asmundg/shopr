@@ -15,6 +15,8 @@ from shopr.main import (
     get_train_set,
     order_list,
     populate_shopping_list,
+    parse_item_quantity,
+    format_item_with_quantity,
     Prefs,
 )
 from shopr.trello import (
@@ -43,6 +45,49 @@ class TestMakeScores:
         """Test that missing keys return default score."""
         scores = make_scores({"milk": 500.0})
         assert scores["bread"] == DEFAULT_SCORE
+
+
+class TestParseItemQuantity:
+    """Tests for parse_item_quantity function."""
+
+    def test_item_without_quantity(self) -> None:
+        """Test parsing item without quantity defaults to 1."""
+        assert parse_item_quantity("eggs") == ("eggs", 1)
+
+    def test_item_with_quantity(self) -> None:
+        """Test parsing item with quantity."""
+        assert parse_item_quantity("eggs 2") == ("eggs", 2)
+
+    def test_item_with_larger_quantity(self) -> None:
+        """Test parsing item with larger quantity."""
+        assert parse_item_quantity("milk 10") == ("milk", 10)
+
+    def test_multi_word_item_with_quantity(self) -> None:
+        """Test parsing multi-word item with quantity."""
+        assert parse_item_quantity("whole milk 3") == ("whole milk", 3)
+
+    def test_item_with_non_numeric_suffix(self) -> None:
+        """Test that non-numeric suffix is kept in name."""
+        assert parse_item_quantity("eggs large") == ("eggs large", 1)
+
+    def test_strips_whitespace(self) -> None:
+        """Test that whitespace is stripped."""
+        assert parse_item_quantity("  eggs  ") == ("eggs", 1)
+        assert parse_item_quantity("  eggs 2  ") == ("eggs", 2)
+
+
+class TestFormatItemWithQuantity:
+    """Tests for format_item_with_quantity function."""
+
+    def test_quantity_one_no_suffix(self) -> None:
+        """Test that quantity 1 doesn't add suffix."""
+        assert format_item_with_quantity("eggs", 1) == "eggs"
+
+    def test_quantity_greater_than_one_adds_suffix(self) -> None:
+        """Test that quantity > 1 adds suffix."""
+        assert format_item_with_quantity("eggs", 2) == "eggs 2"
+        assert format_item_with_quantity("eggs", 3) == "eggs 3"
+        assert format_item_with_quantity("milk", 10) == "milk 10"
 
 
 class TestLookupCandidates:
@@ -476,13 +521,13 @@ class TestPopulateShoppingList:
         assert "Pasta" in posted_names
         assert "Tomatoes" in posted_names
 
-    async def test_skips_duplicate_items(
+    async def test_merges_duplicate_items(
         self,
         trello_client: TrelloClient,
         prefs: Prefs,
         httpx_mock: HTTPXMock,
     ) -> None:
-        """Test that duplicate items are not added twice."""
+        """Test that duplicate items are merged with quantities."""
         populate_card = Card(
             id="populate_card",
             idBoard="board123",
@@ -518,7 +563,7 @@ class TestPopulateShoppingList:
                 ChecklistItem(id="i2", idChecklist="checklist2", name="milk", pos=1),  # lowercase duplicate
             ],
         )
-        new_item = ChecklistItem(id="new_item", idChecklist="target_checklist", name="Milk", pos=1)
+        new_item = ChecklistItem(id="new_item", idChecklist="target_checklist", name="milk 2", pos=1)
 
         httpx_mock.add_response(
             url=f"{ROOT}/1/boards/board123/cards?key=test_key&token=test_token",
@@ -563,10 +608,107 @@ class TestPopulateShoppingList:
 
         await populate_shopping_list(trello_client, prefs)
 
-        # Only one item should have been added (case-insensitive dedup)
+        # Only one item should have been added with merged quantity
+        # The casing should match the first occurrence ("Milk")
         requests = httpx_mock.get_requests()
         post_requests = [r for r in requests if r.method == "POST"]
         assert len(post_requests) == 1
+        posted_name = json.loads(post_requests[0].content)["name"]
+        assert posted_name == "Milk 2"
+
+    async def test_merges_items_with_explicit_quantities(
+        self,
+        trello_client: TrelloClient,
+        prefs: Prefs,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        """Test that items with explicit quantities are merged correctly (e.g., 'eggs' + 'eggs 2' = 'eggs 3')."""
+        populate_card = Card(
+            id="populate_card",
+            idBoard="board123",
+            name="Shopping List",
+            idChecklists=["target_checklist"],
+            labels=[{"id": "l1", "name": "populate"}],
+        )
+        recipe1 = Card(
+            id="recipe1",
+            idBoard="board123",
+            name="Recipe 1",
+            idChecklists=["checklist1"],
+            labels=[],
+        )
+        recipe2 = Card(
+            id="recipe2",
+            idBoard="board123",
+            name="Recipe 2",
+            idChecklists=["checklist2"],
+            labels=[],
+        )
+        checklist1 = Checklist(
+            id="checklist1",
+            name="Ingredients",
+            checkItems=[
+                ChecklistItem(id="i1", idChecklist="checklist1", name="eggs", pos=1),
+            ],
+        )
+        checklist2 = Checklist(
+            id="checklist2",
+            name="Ingredients",
+            checkItems=[
+                ChecklistItem(id="i2", idChecklist="checklist2", name="eggs 2", pos=1),
+            ],
+        )
+        new_item = ChecklistItem(id="new_item", idChecklist="target_checklist", name="eggs 3", pos=1)
+
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/boards/board123/cards?key=test_key&token=test_token",
+            json=[populate_card.model_dump()],
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/lists/selected123/cards?key=test_key&token=test_token",
+            json=[recipe1.model_dump(), recipe2.model_dump()],
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/checklist1?key=test_key&token=test_token",
+            json=checklist1.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/checklist2?key=test_key&token=test_token",
+            json=checklist2.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/target_checklist/checkItems?key=test_key&token=test_token",
+            method="POST",
+            json=new_item.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/recipe1?key=test_key&token=test_token",
+            method="PUT",
+            json={"id": "recipe1"},
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/recipe2?key=test_key&token=test_token",
+            method="PUT",
+            json={"id": "recipe2"},
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/populate_card?key=test_key&token=test_token",
+            json=populate_card.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/populate_card/idLabels/l1?key=test_key&token=test_token",
+            method="DELETE",
+            json={},
+        )
+
+        await populate_shopping_list(trello_client, prefs)
+
+        # Only one item should have been added with merged quantity (1 + 2 = 3)
+        requests = httpx_mock.get_requests()
+        post_requests = [r for r in requests if r.method == "POST"]
+        assert len(post_requests) == 1
+        posted_name = json.loads(post_requests[0].content)["name"]
+        assert posted_name == "eggs 3"
 
     async def test_creates_checklist_if_none_exists(
         self,
