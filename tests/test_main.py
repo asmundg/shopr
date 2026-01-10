@@ -496,6 +496,11 @@ class TestPopulateShoppingList:
             method="POST",
             json=new_item2.model_dump(),
         )
+        # Mock getting checklist again for resetting checkmarks
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/recipe_checklist?key=test_key&token=test_token",
+            json=recipe_checklist.model_dump(),
+        )
         httpx_mock.add_response(
             url=f"{ROOT}/1/cards/recipe1?key=test_key&token=test_token",
             method="PUT",
@@ -585,6 +590,15 @@ class TestPopulateShoppingList:
             url=f"{ROOT}/1/checklists/target_checklist/checkItems?key=test_key&token=test_token",
             method="POST",
             json=new_item.model_dump(),
+        )
+        # Mock getting checklists again for resetting checkmarks
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/checklist1?key=test_key&token=test_token",
+            json=checklist1.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/checklist2?key=test_key&token=test_token",
+            json=checklist2.model_dump(),
         )
         httpx_mock.add_response(
             url=f"{ROOT}/1/cards/recipe1?key=test_key&token=test_token",
@@ -681,6 +695,15 @@ class TestPopulateShoppingList:
             method="POST",
             json=new_item.model_dump(),
         )
+        # Mock getting checklists again for resetting checkmarks
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/checklist1?key=test_key&token=test_token",
+            json=checklist1.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/checklist2?key=test_key&token=test_token",
+            json=checklist2.model_dump(),
+        )
         httpx_mock.add_response(
             url=f"{ROOT}/1/cards/recipe1?key=test_key&token=test_token",
             method="PUT",
@@ -757,6 +780,119 @@ class TestPopulateShoppingList:
 
         body = json.loads(post_requests[0].content)
         assert body["name"] == "Shopping List"
+
+    async def test_skips_checked_items_and_resets_checkmarks(
+        self,
+        trello_client: TrelloClient,
+        prefs: Prefs,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        """Test that checked items are skipped and checkmarks are reset when moving cards back."""
+        populate_card = Card(
+            id="populate_card",
+            idBoard="board123",
+            name="Shopping List",
+            idChecklists=["target_checklist"],
+            labels=[{"id": "l1", "name": "populate"}],
+        )
+        recipe_card = Card(
+            id="recipe1",
+            idBoard="board123",
+            name="Recipe",
+            idChecklists=["recipe_checklist"],
+            labels=[],
+        )
+        recipe_checklist = Checklist(
+            id="recipe_checklist",
+            name="Ingredients",
+            checkItems=[
+                ChecklistItem(id="i1", idChecklist="recipe_checklist", name="Pasta", pos=1, state="incomplete"),
+                ChecklistItem(id="i2", idChecklist="recipe_checklist", name="Tomatoes", pos=2, state="complete"),  # Checked
+                ChecklistItem(id="i3", idChecklist="recipe_checklist", name="Cheese", pos=3, state="incomplete"),
+                ChecklistItem(id="i4", idChecklist="recipe_checklist", name="Garlic", pos=4, state="complete"),  # Checked
+            ],
+        )
+        new_item1 = ChecklistItem(id="new_item1", idChecklist="target_checklist", name="Pasta", pos=1)
+        new_item2 = ChecklistItem(id="new_item2", idChecklist="target_checklist", name="Cheese", pos=2)
+
+        # Mock getting board cards
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/boards/board123/cards?key=test_key&token=test_token",
+            json=[populate_card.model_dump()],
+        )
+        # Mock getting selected recipes
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/lists/selected123/cards?key=test_key&token=test_token",
+            json=[recipe_card.model_dump()],
+        )
+        # Mock getting recipe checklist (first time for gathering items)
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/recipe_checklist?key=test_key&token=test_token",
+            json=recipe_checklist.model_dump(),
+        )
+        # Mock adding unchecked items to target checklist
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/target_checklist/checkItems?key=test_key&token=test_token",
+            method="POST",
+            json=new_item1.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/target_checklist/checkItems?key=test_key&token=test_token",
+            method="POST",
+            json=new_item2.model_dump(),
+        )
+        # Mock getting recipe checklist again (for resetting checkmarks)
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/checklists/recipe_checklist?key=test_key&token=test_token",
+            json=recipe_checklist.model_dump(),
+        )
+        # Mock updating checked items to reset them
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/recipe1/checklist/recipe_checklist/checkItem/i2?key=test_key&token=test_token",
+            method="PUT",
+            json={},
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/recipe1/checklist/recipe_checklist/checkItem/i4?key=test_key&token=test_token",
+            method="PUT",
+            json={},
+        )
+        # Mock moving card back to available list
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/recipe1?key=test_key&token=test_token",
+            method="PUT",
+            json={"id": "recipe1"},
+        )
+        # Mock getting card and removing label
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/populate_card?key=test_key&token=test_token",
+            json=populate_card.model_dump(),
+        )
+        httpx_mock.add_response(
+            url=f"{ROOT}/1/cards/populate_card/idLabels/l1?key=test_key&token=test_token",
+            method="DELETE",
+            json={},
+        )
+
+        await populate_shopping_list(trello_client, prefs)
+
+        # Verify only unchecked items were added (Pasta and Cheese, not Tomatoes or Garlic)
+        requests = httpx_mock.get_requests()
+        post_requests = [r for r in requests if r.method == "POST" and "checkItems" in str(r.url)]
+        assert len(post_requests) == 2
+        posted_names = [json.loads(r.content)["name"] for r in post_requests]
+        assert "Pasta" in posted_names
+        assert "Cheese" in posted_names
+        assert "Tomatoes" not in posted_names
+        assert "Garlic" not in posted_names
+
+        # Verify checked items were reset
+        put_requests = [r for r in requests if r.method == "PUT" and "checkItem" in str(r.url)]
+        assert len(put_requests) == 2
+        # Verify the state was set to incomplete
+        for r in put_requests:
+            body = json.loads(r.content)
+            assert body["state"] == "incomplete"
 
     async def test_does_nothing_without_populate_label(
         self,
