@@ -35,6 +35,26 @@ Create a `.trello.json` file with your Trello API credentials:
 }
 ```
 
+### Error Monitoring (Optional)
+
+Shopr supports [Sentry](https://sentry.io) integration for error monitoring and alerting. To enable Sentry:
+
+1. Create a Sentry account and project at [sentry.io](https://sentry.io)
+2. Get your DSN from your Sentry project settings
+3. Set the `SENTRY_DSN` environment variable:
+
+```bash
+export SENTRY_DSN="your-sentry-dsn-here"
+```
+
+Optionally, you can also set the environment name:
+
+```bash
+export SENTRY_ENVIRONMENT="production"  # or "development", "staging", etc.
+```
+
+When Sentry is enabled, errors and exceptions will be automatically reported to your Sentry dashboard, allowing you to track and debug issues in production.
+
 ## Usage
 
 Run the shopr application:
