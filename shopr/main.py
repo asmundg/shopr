@@ -343,6 +343,11 @@ async def populate_shopping_list(
 
                 # Copy each item from the recipe checklist to the populate card's checklist
                 for checklist_item in checklist.checkItems:
+                    # Skip checked items (treated as optional/not needed)
+                    if checklist_item.state == "complete":
+                        logger.debug(f"Skipping checked item: {checklist_item.name}")
+                        continue
+
                     # Parse the item to extract base name and quantity
                     base_name, quantity = parse_item_quantity(checklist_item.name)
                     base_name_lower = base_name.lower()
@@ -371,6 +376,21 @@ async def populate_shopping_list(
 
         # Move recipe cards back to the available recipes list
         for recipe_card in selected_recipes:
+            # Reset all checkmarks before moving back to available pool
+            for id_checklist in recipe_card.idChecklists:
+                checklist = await client.get_checklist(id_checklist)
+                for checklist_item in checklist.checkItems:
+                    if checklist_item.state == "complete":
+                        # Reset checked items to incomplete
+                        checklist_item.state = "incomplete"
+                        await client.update_checklist_item(
+                            recipe_card.id,
+                            id_checklist,
+                            checklist_item.id,
+                            checklist_item,
+                        )
+                        logger.debug(f"Reset checkmark for item: {checklist_item.name}")
+
             await client.move_card_to_list(recipe_card.id, prefs.available_list)
             logger.info(f"Moved recipe {recipe_card.name} back to available list")
 
