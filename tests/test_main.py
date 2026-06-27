@@ -106,12 +106,35 @@ class TestLookupCandidates:
         assert lookup_candidates("Milk [unsorted]") == ["milk"]
 
     def test_strips_numbers_and_parens(self) -> None:
-        """Test that numbers and parentheses are removed."""
-        assert lookup_candidates("Milk (2L)") == ["l", "milk"]
+        """Test that numbers, units, and parentheses are removed."""
+        assert lookup_candidates("Milk (2L)") == ["milk"]
 
     def test_normalizes_whitespace(self) -> None:
         """Test that extra whitespace is normalized."""
         assert lookup_candidates("  Whole   Milk  ") == ["milk", "whole"]
+
+    def test_strips_unit_with_no_space(self) -> None:
+        """Test that a unit glued to a number doesn't survive as a word."""
+        assert lookup_candidates("Yogurt (500g)") == ["yogurt"]
+
+    def test_strips_descriptor_stopwords(self) -> None:
+        """Test that non-identifying descriptors are filtered out."""
+        assert lookup_candidates("Fresh Basil") == ["basil"]
+        assert lookup_candidates("Fresh Cilantro") == ["cilantro"]
+
+    def test_singularizes_plurals(self) -> None:
+        """Test that plural and singular forms normalize to the same word."""
+        assert lookup_candidates("Tomatoes") == lookup_candidates("Tomato")
+        assert lookup_candidates("Eggs") == ["egg"]
+
+    def test_does_not_mangle_us_and_ss_endings(self) -> None:
+        """Test that words like "asparagus" and "swiss" aren't truncated."""
+        assert lookup_candidates("Asparagus") == ["asparagus"]
+        assert lookup_candidates("Swiss Cheese") == ["cheese", "swiss"]
+
+    def test_strips_extra_punctuation(self) -> None:
+        """Test that hyphens and commas are treated as separators."""
+        assert lookup_candidates("Low-Fat Milk") == ["fat", "low", "milk"]
 
 
 class TestLookup:
@@ -137,6 +160,29 @@ class TestLookup:
         scores = make_scores({"milk,whole": 500.0, "milk": 600.0})
         # Full key "milk,whole" should be preferred (it's longer)
         assert lookup(scores, "Whole Milk") == 500.0
+
+    def test_does_not_bleed_from_shared_word_when_better_overlap_exists(
+        self,
+    ) -> None:
+        """Test that a closer multi-word match wins over a single shared word."""
+        scores = make_scores(
+            {
+                "broth,chicken": 100.0,
+                "chicken,thigh": 700.0,
+                "chicken": 700.0,  # last trainer overwrote the shared word
+            }
+        )
+        # "Chicken Thighs" has no exact full-key match ("thighs" -> "thigh"
+        # singularizes differently here), but overlaps "chicken,thigh"
+        # fully and "broth,chicken" only partially - it should prefer the
+        # closer match instead of just falling back to the bare "chicken"
+        # word score.
+        assert lookup(scores, "Chicken Thigh Fillets") == 700.0
+
+    def test_falls_back_to_single_word_when_no_full_key_overlaps(self) -> None:
+        """Test the single-word fallback still works when nothing else matches."""
+        scores = make_scores({"chicken": 300.0})
+        assert lookup(scores, "Chicken Stock") == 300.0
 
 
 class TestUpdate:

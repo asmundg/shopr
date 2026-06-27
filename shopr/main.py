@@ -30,6 +30,31 @@ DEFAULT_SCORE = 1000.0
 UNSORTED_TAG = " [unsorted]"
 UNSORTED_RE = re.compile(r"\[unsorted\]")
 
+# Units of measure that trail a quantity (e.g. "2L", "500 g"). Stripped
+# together with the number so a stray unit letter doesn't survive as its
+# own candidate word and bleed into unrelated items.
+UNIT_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*("
+    r"kg|kilograms?|g|grams?|lbs?|pounds?|oz|ounces?"
+    r"|ml|milliliters?|millilitres?|l|liters?|litres?"
+    r"|pkg|packs?|ct|count|x"
+    r")\b"
+)
+
+# Descriptors and packaging words that don't identify the item itself.
+# Leaving these in candidates causes both misses (the same item recorded
+# with/without a descriptor produces different full keys) and bleed
+# (unrelated items sharing a descriptor overwrite each other's fallback
+# word score, e.g. "fresh basil" and "fresh cilantro" both producing "fresh").
+STOPWORDS = {
+    "fresh", "frozen", "organic", "large", "small", "medium", "extra",
+    "chopped", "diced", "sliced", "minced", "ground", "raw", "ripe",
+    "fine", "coarse", "can", "cans", "bag", "bags", "box", "boxes",
+    "jar", "jars", "bunch", "bunches", "pack", "packs", "package",
+    "packages", "container", "containers", "bottle", "bottles",
+    "of", "and", "the", "a", "an", "for", "with",
+}
+
 
 # Type alias for scores
 Scores = defaultdict[str, float]
@@ -123,6 +148,33 @@ async def reset_label(
                 await client.remove_label(card.id, label["id"])
 
 
+def singularize(word: str) -> str:
+    """Strip a common English plural suffix from a word.
+
+    Best-effort heuristic, not a full stemmer: it exists to make
+    "tomato"/"tomatoes" or "egg"/"eggs" resolve to the same candidate
+    instead of being treated as unrelated items.
+
+    Args:
+        word: Word to singularize
+
+    Returns:
+        Singularized word
+    """
+    if len(word) <= 3:
+        return word
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith(("ses", "xes", "zes", "ches", "shes", "oes")):
+        return word[:-2]
+    # Words ending in "us"/"ss" (asparagus, hummus, swiss) aren't plurals.
+    if word.endswith(("us", "ss")):
+        return word
+    if word.endswith("s"):
+        return word[:-1]
+    return word
+
+
 def lookup_candidates(name: str) -> list[str]:
     """Strip useless characters and return candidate identifiers.
 
@@ -132,17 +184,20 @@ def lookup_candidates(name: str) -> list[str]:
     Returns:
         List of candidate identifiers
     """
-    # Remove unsorted tag, numbers, parentheses
-    stripped = (
-        name.lower()
-        .replace("[unsorted]", "")
-    )
-    # Remove digits and parentheses
-    stripped = re.sub(r"[\d\(\)]", "", stripped)
+    # Remove unsorted tag
+    stripped = name.lower().replace("[unsorted]", "")
+    # Remove quantity + unit combos (e.g. "2l", "500 g") so a stray unit
+    # letter doesn't survive as its own candidate
+    stripped = UNIT_RE.sub(" ", stripped)
+    # Treat remaining punctuation as word separators
+    stripped = re.sub(r"[\d\(\),.\-/&:;%]", " ", stripped)
     # Normalize whitespace
     stripped = re.sub(r"\s+", " ", stripped).strip()
 
-    candidates = sorted(stripped.split(" "))
+    words = [word for word in stripped.split(" ") if word]
+    words = [singularize(word) for word in words if word not in STOPWORDS]
+
+    candidates = sorted(words)
     logger.debug(f"Lookup {name} => {candidates}")
     return candidates
 
@@ -158,19 +213,42 @@ def lookup(scores: Scores, name: str) -> float:
         Score for the item
     """
     candidates = lookup_candidates(name)
-
-    # Use longest word as preferred identifier if we don't find an exact match
-    full_key = ",".join(candidates)
-    all_candidates = [full_key] + candidates
-
-    # Filter candidates that have scores
-    scored_candidates = [c for c in all_candidates if c in scores]
-
-    if not scored_candidates:
+    if not candidates:
         return DEFAULT_SCORE
 
-    # Find longest candidate
-    candidate = max(scored_candidates, key=len, default="")
+    full_key = ",".join(candidates)
+    if full_key in scores:
+        return scores[full_key]
+
+    # No exact match. Look for the known item whose words overlap the most
+    # (by Jaccard similarity) rather than just any single shared word - a
+    # single shared word (e.g. "chicken" in both "chicken broth" and
+    # "chicken thighs") is a weak, bleed-prone signal on its own.
+    query_words = set(candidates)
+    best_key = None
+    best_similarity = 0.0
+    for key in scores:
+        if "," not in key:
+            continue
+        key_words = set(key.split(","))
+        overlap = query_words & key_words
+        if not overlap:
+            continue
+        similarity = len(overlap) / len(query_words | key_words)
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_key = key
+
+    if best_key is not None:
+        logger.debug(f"Lookup {name} => best overlap candidate {best_key}")
+        return scores[best_key]
+
+    # Last resort: fall back to the longest single word with a score.
+    scored_words = [c for c in candidates if c in scores]
+    if not scored_words:
+        return DEFAULT_SCORE
+
+    candidate = max(scored_words, key=len)
     logger.debug(f"Lookup {name} => final candidate {candidate}")
     return scores[candidate]
 
