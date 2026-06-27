@@ -432,38 +432,35 @@ def train(checklist: Checklist, old_scores: Scores) -> Scores:
     # Create ELO ranking system
     elo = EloRank()
 
-    # Process each pair of items
-    for current in checklist.checkItems:
-        current_score = lookup(scores, current.name)
+    # Snapshot starting ratings so every comparison in this round is judged
+    # against the same baseline, regardless of the items' iteration order.
+    items = checklist.checkItems
+    starting_scores = {item.name: lookup(scores, item.name) for item in items}
+    deltas: defaultdict[str, float] = defaultdict(float)
 
-        for compare in checklist.checkItems:
+    # Process each unordered pair of items exactly once
+    for i, current in enumerate(items):
+        current_score = starting_scores[current.name]
+
+        for compare in items[i + 1:]:
             # Same object
             if current.pos == compare.pos:
                 continue
 
             # Lower pos means earlier in sequence
-            compare_score = lookup(scores, compare.name)
+            compare_score = starting_scores[compare.name]
 
-            # Update current item's score
             current_expected = elo.get_expected(current_score, compare_score)
-            current_actual = 0 if current.pos < compare.pos else 1
-            new_current_score = elo.update_rating(
-                current_expected,
-                current_actual,
-                current_score
-            )
-            update(scores, current.name, new_current_score)
-            current_score = new_current_score
-
-            # Update compare item's score
             compare_expected = elo.get_expected(compare_score, current_score)
-            compare_actual = 0 if compare.pos < current.pos else 1
-            new_compare_score = elo.update_rating(
-                compare_expected,
-                compare_actual,
-                compare_score
-            )
-            update(scores, compare.name, new_compare_score)
+
+            current_actual = 0 if current.pos < compare.pos else 1
+            compare_actual = 1 - current_actual
+
+            deltas[current.name] += elo.update_rating(current_expected, current_actual, 0.0)
+            deltas[compare.name] += elo.update_rating(compare_expected, compare_actual, 0.0)
+
+    for item in items:
+        update(scores, item.name, starting_scores[item.name] + deltas[item.name])
 
     return scores
 
