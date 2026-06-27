@@ -125,6 +125,12 @@ class TestLookupCandidates:
     def test_singularizes_plurals(self) -> None:
         """Test that plural and singular forms normalize to the same word."""
         assert lookup_candidates("Tomatoes") == lookup_candidates("Tomato")
+
+    def test_singularizes_norwegian_irregular_plurals(self) -> None:
+        """Test Norwegian irregular plurals, which English suffix-stripping
+        gets wrong (e.g. "gulrøtter" does not just drop an "-er")."""
+        assert lookup_candidates("Gulrøtter") == lookup_candidates("Gulrot")
+        assert lookup_candidates("Poteter") == lookup_candidates("Potet")
         assert lookup_candidates("Eggs") == ["egg"]
 
     def test_does_not_mangle_us_and_ss_endings(self) -> None:

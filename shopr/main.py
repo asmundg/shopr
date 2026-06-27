@@ -9,6 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import simplemma
+
 from .elo import EloRank
 from .trello import (
     Checklist,
@@ -40,6 +42,9 @@ UNIT_RE = re.compile(
     r"|pkg|packs?|ct|count|x"
     r")\b"
 )
+
+# Item names are mostly Norwegian (Bokmål) with occasional English.
+LEMMA_LANGS = ("nb", "en")
 
 # Descriptors and packaging words that don't identify the item itself.
 # Leaving these in candidates causes both misses (the same item recorded
@@ -149,30 +154,18 @@ async def reset_label(
 
 
 def singularize(word: str) -> str:
-    """Strip a common English plural suffix from a word.
+    """Lemmatize a word so inflected forms resolve to the same candidate.
 
-    Best-effort heuristic, not a full stemmer: it exists to make
-    "tomato"/"tomatoes" or "egg"/"eggs" resolve to the same candidate
-    instead of being treated as unrelated items.
+    e.g. "gulrøtter"/"gulrot" (Norwegian, irregular plural) or
+    "tomatoes"/"tomato" (English) should produce the same identifier.
 
     Args:
-        word: Word to singularize
+        word: Word to lemmatize
 
     Returns:
-        Singularized word
+        Lemmatized word
     """
-    if len(word) <= 3:
-        return word
-    if word.endswith("ies"):
-        return word[:-3] + "y"
-    if word.endswith(("ses", "xes", "zes", "ches", "shes", "oes")):
-        return word[:-2]
-    # Words ending in "us"/"ss" (asparagus, hummus, swiss) aren't plurals.
-    if word.endswith(("us", "ss")):
-        return word
-    if word.endswith("s"):
-        return word[:-1]
-    return word
+    return simplemma.lemmatize(word, lang=LEMMA_LANGS)
 
 
 def lookup_candidates(name: str) -> list[str]:
