@@ -7,10 +7,9 @@ from pytest_httpx import HTTPXMock
 
 from shopr.main import (
     DEFAULT_SCORE,
-    make_scores,
+    Scores,
+    item_key,
     lookup_candidates,
-    lookup,
-    update,
     train,
     get_train_set,
     order_list,
@@ -28,23 +27,102 @@ from shopr.trello import (
 )
 
 
-class TestMakeScores:
-    """Tests for make_scores function."""
+class TestScores:
+    """Tests for the Scores store."""
 
     def test_empty_scores_returns_default(self) -> None:
-        """Test getting a missing key returns default score."""
-        scores = make_scores()
-        assert scores["missing"] == DEFAULT_SCORE
+        """Test getting a missing item returns default score."""
+        scores = Scores()
+        assert scores.lookup("missing") == DEFAULT_SCORE
 
     def test_initialized_with_data(self) -> None:
         """Test initializing with existing data."""
-        scores = make_scores({"milk": 500.0})
-        assert scores["milk"] == 500.0
+        scores = Scores({"milk": 500.0})
+        assert scores.lookup("milk") == 500.0
 
     def test_missing_key_returns_default(self) -> None:
-        """Test that missing keys return default score."""
-        scores = make_scores({"milk": 500.0})
-        assert scores["bread"] == DEFAULT_SCORE
+        """Test that unknown items return default score."""
+        scores = Scores({"milk": 500.0})
+        assert scores.lookup("bread") == DEFAULT_SCORE
+
+    def test_name_variants_share_one_entry(self) -> None:
+        """Test quantity, casing and tag variants resolve to the same item."""
+        scores = Scores({"melk 2": 400.0})
+
+        assert scores.lookup("melk 3") == 400.0
+        assert scores.lookup("Melk") == 400.0
+        assert scores.lookup("melk (2L)") == 400.0
+        assert scores.lookup("melk [unsorted]") == 400.0
+
+    def test_update_overwrites_variant_of_same_item(self) -> None:
+        """Test that retraining a variant replaces rather than duplicates."""
+        scores = Scores({"melk 2": 400.0})
+        scores.update("melk 3", 450.0)
+
+        assert scores.as_dict() == {"melk 3": 450.0}
+
+    def test_variants_in_a_stored_file_collapse_to_one_rank(self) -> None:
+        """Test that a file holding several names for one item yields one rank.
+
+        The persisted name is a label, not the identity, so a store that
+        accumulated "melk 2" and "melk 3" resolves to a single score rather
+        than ranking the same item twice.
+        """
+        scores = Scores({"melk 2": 100.0, "brod": 500.0, "melk 3": 900.0})
+
+        assert scores.as_dict() == {"melk 3": 900.0, "brod": 500.0}
+        assert scores.lookup("melk 2") == 900.0
+        assert scores.lookup("melk") == 900.0
+
+    def test_persists_raw_names_not_derived_keys(self) -> None:
+        """Test that the serialized form keeps the name it was trained on.
+
+        Storing the derived key instead would discard the information needed
+        to re-derive it, orphaning every score whenever normalization changes.
+        """
+        scores = Scores()
+        scores.update("Frossen Koriander (2 poser)", 700.0)
+
+        assert scores.as_dict() == {"Frossen Koriander (2 poser)": 700.0}
+
+    def test_survives_a_normalization_change(self, monkeypatch) -> None:
+        """Test that changing normalization re-derives instead of orphaning.
+
+        This is the regression that broke live ranking: scores.json held
+        derived keys, so tightening lookup_candidates stranded 48% of them
+        and lookups silently returned unrelated items' scores.
+        """
+        import sys
+
+        main_module = sys.modules["shopr.main"]
+
+        scores = Scores()
+        scores.update("2 Frosne Blabaer", 250.0)
+        saved = json.loads(json.dumps(scores.as_dict()))
+
+        # Normalization now also discards a descriptor it used to keep.
+        monkeypatch.setattr(
+            main_module, "STOPWORDS", main_module.STOPWORDS | {"frosne"}
+        )
+
+        reloaded = Scores(saved)
+        assert reloaded.lookup("Blabaer") == 250.0
+        assert reloaded.lookup("2 Frosne Blabaer") == 250.0
+
+    def test_name_with_no_identifying_words_is_not_stored(self) -> None:
+        """Test that a name that normalizes to nothing is ignored."""
+        scores = Scores()
+        scores.update("500 g", 300.0)
+
+        assert scores.as_dict() == {}
+        assert scores.lookup("500 g") == DEFAULT_SCORE
+
+    def test_contains_reports_trained_items(self) -> None:
+        """Test membership drives the [unsorted] tag in order_list."""
+        scores = Scores({"milk": 500.0})
+
+        assert "Milk (1L)" in scores
+        assert "Bread" not in scores
 
 
 class TestParseItemQuantity:
@@ -122,21 +200,11 @@ class TestLookupCandidates:
         assert lookup_candidates("Fresh Basil") == ["basil"]
         assert lookup_candidates("Fresh Cilantro") == ["cilantro"]
 
-    def test_singularizes_plurals(self) -> None:
-        """Test that plural and singular forms normalize to the same word."""
-        assert lookup_candidates("Tomatoes") == lookup_candidates("Tomato")
-
-    def test_singularizes_norwegian_irregular_plurals(self) -> None:
-        """Test Norwegian irregular plurals, which English suffix-stripping
-        gets wrong (e.g. "gulrøtter" does not just drop an "-er")."""
-        assert lookup_candidates("Gulrøtter") == lookup_candidates("Gulrot")
-        assert lookup_candidates("Poteter") == lookup_candidates("Potet")
-        assert lookup_candidates("Eggs") == ["egg"]
-
-    def test_does_not_mangle_us_and_ss_endings(self) -> None:
-        """Test that words like "asparagus" and "swiss" aren't truncated."""
-        assert lookup_candidates("Asparagus") == ["asparagus"]
-        assert lookup_candidates("Swiss Cheese") == ["cheese", "swiss"]
+    def test_leaves_words_intact(self) -> None:
+        """Test that words are not stemmed, which mangled Norwegian nouns."""
+        assert lookup_candidates("Brød") == ["brød"]
+        assert lookup_candidates("Vann") == ["vann"]
+        assert lookup_candidates("Havremelk") == ["havremelk"]
 
     def test_strips_extra_punctuation(self) -> None:
         """Test that hyphens and commas are treated as separators."""
@@ -144,64 +212,41 @@ class TestLookupCandidates:
 
 
 class TestLookup:
-    """Tests for lookup function."""
+    """Tests for score lookup."""
 
     def test_no_score_returns_default(self) -> None:
         """Test that missing items return default score."""
-        scores = make_scores()
-        assert lookup(scores, "Unknown Item") == DEFAULT_SCORE
+        scores = Scores()
+        assert scores.lookup("Unknown Item") == DEFAULT_SCORE
 
     def test_exact_match(self) -> None:
-        """Test exact match on full key."""
-        scores = make_scores({"milk,whole": 500.0})
-        assert lookup(scores, "Whole Milk") == 500.0
+        """Test exact match on the full item."""
+        scores = Scores({"Whole Milk": 500.0})
+        assert scores.lookup("milk whole") == 500.0
 
-    def test_partial_match_uses_longest(self) -> None:
-        """Test that partial matches use longest candidate."""
-        scores = make_scores({"milk": 600.0})
-        assert lookup(scores, "Whole Milk") == 600.0
+    def test_word_order_does_not_matter(self) -> None:
+        """Test that the key is order independent."""
+        scores = Scores({"Whole Milk": 500.0})
+        assert scores.lookup("Milk, Whole") == 500.0
 
-    def test_full_key_preferred_over_partial(self) -> None:
-        """Test that full key is preferred over partial match."""
-        scores = make_scores({"milk,whole": 500.0, "milk": 600.0})
-        # Full key "milk,whole" should be preferred (it's longer)
-        assert lookup(scores, "Whole Milk") == 500.0
+    def test_does_not_borrow_score_from_a_different_item(self) -> None:
+        """Test that a shared word does not leak a score between items.
 
-    def test_does_not_bleed_from_shared_word_when_better_overlap_exists(
-        self,
-    ) -> None:
-        """Test that a closer multi-word match wins over a single shared word."""
-        scores = make_scores(
-            {
-                "broth,chicken": 100.0,
-                "chicken,thigh": 700.0,
-                "chicken": 700.0,  # last trainer overwrote the shared word
-            }
-        )
-        # "Chicken Thighs" has no exact full-key match ("thighs" -> "thigh"
-        # singularizes differently here), but overlaps "chicken,thigh"
-        # fully and "broth,chicken" only partially - it should prefer the
-        # closer match instead of just falling back to the bare "chicken"
-        # word score.
-        assert lookup(scores, "Chicken Thigh Fillets") == 700.0
+        Returning a neighbour's score here is what scattered the live
+        ranking: "salt og pepper" inherited "potetgull"'s position.
+        """
+        scores = Scores({"Chicken Broth": 100.0, "Chicken Thighs": 700.0})
 
-    def test_falls_back_to_single_word_when_no_full_key_overlaps(self) -> None:
-        """Test the single-word fallback still works when nothing else matches."""
-        scores = make_scores({"chicken": 300.0})
-        assert lookup(scores, "Chicken Stock") == 300.0
+        assert scores.lookup("Chicken Stock") == DEFAULT_SCORE
+        assert scores.lookup("Chicken") == DEFAULT_SCORE
+        assert scores.lookup("Beef Broth") == DEFAULT_SCORE
 
+    def test_training_one_item_does_not_move_its_neighbours(self) -> None:
+        """Test that scoring an item leaves items sharing a word alone."""
+        scores = Scores({"Green Apples": 200.0})
+        scores.update("Green Beans", 900.0)
 
-class TestUpdate:
-    """Tests for update function."""
-
-    def test_updates_all_candidates(self) -> None:
-        """Test that update sets score for all candidates."""
-        scores = make_scores()
-        update(scores, "Whole Milk", 500.0)
-
-        assert scores["milk,whole"] == 500.0
-        assert scores["milk"] == 500.0
-        assert scores["whole"] == 500.0
+        assert scores.lookup("Green Apples") == 200.0
 
 
 class TestTrain:
@@ -227,14 +272,14 @@ class TestTrain:
                 ),
             ],
         )
-        old_scores = make_scores()
+        old_scores = Scores()
 
         new_scores = train(checklist, old_scores)
 
         # Milk (pos=1000) should have lower score than Bread (pos=2000)
         # Lower score = earlier in the store
-        milk_score = new_scores["milk"]
-        bread_score = new_scores["bread"]
+        milk_score = new_scores.lookup("Milk")
+        bread_score = new_scores.lookup("Bread")
         assert milk_score < bread_score
 
     def test_train_preserves_relative_ordering(self) -> None:
@@ -249,17 +294,17 @@ class TestTrain:
             ],
         )
 
-        new_scores = train(checklist, make_scores())
+        new_scores = train(checklist, Scores())
 
-        first = new_scores["first"]
-        second = new_scores["second"]
-        third = new_scores["third"]
+        first = new_scores.lookup("First")
+        second = new_scores.lookup("Second")
+        third = new_scores.lookup("Third")
 
         assert first < second < third
 
     def test_train_does_not_mutate_old_scores(self) -> None:
         """Test that training returns new Scores, not mutating old."""
-        old_scores = make_scores({"milk": 500.0})
+        old_scores = Scores({"milk": 500.0})
         checklist = Checklist(
             id="c1",
             name="Test",
@@ -272,7 +317,7 @@ class TestTrain:
         new_scores = train(checklist, old_scores)
 
         # Old scores should be unchanged
-        assert old_scores["milk"] == 500.0
+        assert old_scores.lookup("milk") == 500.0
         assert "bread" not in old_scores
         # New scores should have bread
         assert "bread" in new_scores
@@ -380,7 +425,7 @@ class TestOrderList:
         httpx_mock: HTTPXMock,
     ) -> None:
         """Test that items are reordered based on their scores."""
-        scores = make_scores({"bread": 200.0, "milk": 100.0})
+        scores = Scores({"bread": 200.0, "milk": 100.0})
 
         card = Card(
             id="card1",
@@ -440,7 +485,7 @@ class TestOrderList:
         httpx_mock: HTTPXMock,
     ) -> None:
         """Test that items without scores get [unsorted] tag added."""
-        scores = make_scores()  # Empty scores
+        scores = Scores()  # Empty scores
 
         card = Card(
             id="card1",
