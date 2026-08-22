@@ -177,7 +177,7 @@ class TestLookupCandidates:
 
     def test_multi_word(self) -> None:
         """Test multi-word name returns sorted words."""
-        assert lookup_candidates("Whole Milk") == ["milk", "whole"]
+        assert lookup_candidates("Hvit Brød") == ["brød", "hvit"]
 
     def test_strips_unsorted_tag(self) -> None:
         """Test that [unsorted] tag is removed."""
@@ -189,7 +189,7 @@ class TestLookupCandidates:
 
     def test_normalizes_whitespace(self) -> None:
         """Test that extra whitespace is normalized."""
-        assert lookup_candidates("  Whole   Milk  ") == ["milk", "whole"]
+        assert lookup_candidates("  Hvit   Brød  ") == ["brød", "hvit"]
 
     def test_strips_unit_with_no_space(self) -> None:
         """Test that a unit glued to a number doesn't survive as a word."""
@@ -201,10 +201,32 @@ class TestLookupCandidates:
         assert lookup_candidates("Fresh Cilantro") == ["cilantro"]
 
     def test_leaves_words_intact(self) -> None:
-        """Test that words are not stemmed, which mangled Norwegian nouns."""
+        """Test that common groceries survive stemming unchanged.
+
+        A dictionary lemmatizer replaced these with unrelated words
+        (brød -> bry, vann -> vinne) and merged havremelk with havremel.
+        """
         assert lookup_candidates("Brød") == ["brød"]
         assert lookup_candidates("Vann") == ["vann"]
         assert lookup_candidates("Havremelk") == ["havremelk"]
+
+    def test_merges_singular_and_plural(self) -> None:
+        """Test that inflected forms of one item resolve to the same key."""
+        assert lookup_candidates("Bananer") == lookup_candidates("banan")
+        assert lookup_candidates("Cherrytomater") == lookup_candidates("cherrytomat")
+        assert lookup_candidates("Appelsiner") == lookup_candidates("appelsin")
+        assert lookup_candidates("Pærer") == lookup_candidates("pære")
+
+    def test_merges_inflection_inside_multi_word_names(self) -> None:
+        """Test that inflected descriptors also collapse."""
+        assert lookup_candidates("2 røde paprika") == lookup_candidates("paprika rød")
+        assert lookup_candidates("hvite bønner") == lookup_candidates("bønne hvit")
+
+    def test_keeps_distinct_groceries_apart(self) -> None:
+        """Test that stemming does not collapse different items."""
+        assert lookup_candidates("Havremelk") != lookup_candidates("Havremel")
+        assert lookup_candidates("Vann") != lookup_candidates("Vin")
+        assert lookup_candidates("Brød") != lookup_candidates("Bær")
 
     def test_strips_extra_punctuation(self) -> None:
         """Test that hyphens and commas are treated as separators."""

@@ -9,6 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import snowballstemmer
+
 from .elo import EloRank
 from .trello import (
     Checklist,
@@ -165,6 +167,13 @@ async def reset_label(
                 await client.remove_label(card.id, label["id"])
 
 
+# Item names are Norwegian, and the same item gets written both singular and
+# plural across weeks. Snowball only strips suffixes, so an unrecognized word
+# is truncated rather than replaced; a dictionary lemmatizer will happily map
+# brød to bry and vann to vinne, which merges unrelated groceries.
+_STEMMER = snowballstemmer.stemmer("norwegian")
+
+
 def lookup_candidates(name: str) -> list[str]:
     """Strip useless characters and return candidate identifiers.
 
@@ -185,7 +194,9 @@ def lookup_candidates(name: str) -> list[str]:
     stripped = re.sub(r"\s+", " ", stripped).strip()
 
     words = [word for word in stripped.split(" ") if word]
-    candidates = sorted(word for word in words if word not in STOPWORDS)
+    # Stopwords are matched before stemming, while they are still whole words.
+    kept = [word for word in words if word not in STOPWORDS]
+    candidates = sorted(_STEMMER.stemWord(word) for word in kept)
     logger.debug(f"Lookup {name} => {candidates}")
     return candidates
 
