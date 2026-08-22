@@ -61,6 +61,19 @@ class TestScores:
 
         assert scores.as_dict() == {"melk 3": 450.0}
 
+    def test_variants_in_a_stored_file_collapse_to_one_rank(self) -> None:
+        """Test that a file holding several names for one item yields one rank.
+
+        The persisted name is a label, not the identity, so a store that
+        accumulated "melk 2" and "melk 3" resolves to a single score rather
+        than ranking the same item twice.
+        """
+        scores = Scores({"melk 2": 100.0, "brod": 500.0, "melk 3": 900.0})
+
+        assert scores.as_dict() == {"melk 3": 900.0, "brod": 500.0}
+        assert scores.lookup("melk 2") == 900.0
+        assert scores.lookup("melk") == 900.0
+
     def test_persists_raw_names_not_derived_keys(self) -> None:
         """Test that the serialized form keeps the name it was trained on.
 
