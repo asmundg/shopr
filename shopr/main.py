@@ -9,8 +9,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import simplemma
-
 from .elo import EloRank
 from .trello import (
     Checklist,
@@ -43,14 +41,8 @@ UNIT_RE = re.compile(
     r")\b"
 )
 
-# Item names are mostly Norwegian (Bokmål) with occasional English.
-LEMMA_LANGS = ("nb", "en")
-
-# Descriptors and packaging words that don't identify the item itself.
-# Leaving these in candidates causes both misses (the same item recorded
-# with/without a descriptor produces different full keys) and bleed
-# (unrelated items sharing a descriptor overwrite each other's fallback
-# word score, e.g. "fresh basil" and "fresh cilantro" both producing "fresh").
+# Descriptors and packaging words that don't identify the item itself, so the
+# same item recorded with and without one resolves to a single key.
 STOPWORDS = {
     "fresh", "frozen", "organic", "large", "small", "medium", "extra",
     "chopped", "diced", "sliced", "minced", "ground", "raw", "ripe",
@@ -61,16 +53,36 @@ STOPWORDS = {
 }
 
 
-# Type alias for scores
-Scores = defaultdict[str, float]
+# Scores are addressed by a key derived from the item name, but the store
+# persists the raw names. Deriving the key on load means a change to the
+# normalization re-derives the index instead of orphaning every learned score.
+class Scores:
+    """Learned position scores for shopping list items."""
 
+    def __init__(self, data: dict[str, float] | None = None):
+        """Build a store from a mapping of raw item name to score."""
+        self._entries: dict[str, tuple[str, float]] = {}
+        for name, score in (data or {}).items():
+            self.update(name, score)
 
-def make_scores(data: dict[str, float] | None = None) -> Scores:
-    """Create a scores defaultdict with DEFAULT_SCORE as default."""
-    scores: Scores = defaultdict(lambda: DEFAULT_SCORE)
-    if data:
-        scores.update(data)
-    return scores
+    def __contains__(self, name: str) -> bool:
+        """Whether this exact item has been trained on."""
+        return item_key(name) in self._entries
+
+    def lookup(self, name: str) -> float:
+        """Score for an item, or DEFAULT_SCORE if it is unknown."""
+        entry = self._entries.get(item_key(name))
+        return DEFAULT_SCORE if entry is None else entry[1]
+
+    def update(self, name: str, score: float) -> None:
+        """Record a score for an item."""
+        key = item_key(name)
+        if key:
+            self._entries[key] = (name, score)
+
+    def as_dict(self) -> dict[str, float]:
+        """Serializable mapping of raw item name to score."""
+        return dict(self._entries.values())
 
 
 class Prefs:
@@ -153,21 +165,6 @@ async def reset_label(
                 await client.remove_label(card.id, label["id"])
 
 
-def singularize(word: str) -> str:
-    """Lemmatize a word so inflected forms resolve to the same candidate.
-
-    e.g. "gulrøtter"/"gulrot" (Norwegian, irregular plural) or
-    "tomatoes"/"tomato" (English) should produce the same identifier.
-
-    Args:
-        word: Word to lemmatize
-
-    Returns:
-        Lemmatized word
-    """
-    return simplemma.lemmatize(word, lang=LEMMA_LANGS)
-
-
 def lookup_candidates(name: str) -> list[str]:
     """Strip useless characters and return candidate identifiers.
 
@@ -188,77 +185,21 @@ def lookup_candidates(name: str) -> list[str]:
     stripped = re.sub(r"\s+", " ", stripped).strip()
 
     words = [word for word in stripped.split(" ") if word]
-    words = [singularize(word) for word in words if word not in STOPWORDS]
-
-    candidates = sorted(words)
+    candidates = sorted(word for word in words if word not in STOPWORDS)
     logger.debug(f"Lookup {name} => {candidates}")
     return candidates
 
 
-def lookup(scores: Scores, name: str) -> float:
-    """Look up score for an item name.
+def item_key(name: str) -> str:
+    """Derive the storage key identifying an item.
 
     Args:
-        scores: Score storage
         name: Item name
 
     Returns:
-        Score for the item
+        Key string, empty if the name carries no identifying words
     """
-    candidates = lookup_candidates(name)
-    if not candidates:
-        return DEFAULT_SCORE
-
-    full_key = ",".join(candidates)
-    if full_key in scores:
-        return scores[full_key]
-
-    # No exact match. Look for the known item whose words overlap the most
-    # (by Jaccard similarity) rather than just any single shared word - a
-    # single shared word (e.g. "chicken" in both "chicken broth" and
-    # "chicken thighs") is a weak, bleed-prone signal on its own.
-    query_words = set(candidates)
-    best_key = None
-    best_similarity = 0.0
-    for key in scores:
-        if "," not in key:
-            continue
-        key_words = set(key.split(","))
-        overlap = query_words & key_words
-        if not overlap:
-            continue
-        similarity = len(overlap) / len(query_words | key_words)
-        if similarity > best_similarity:
-            best_similarity = similarity
-            best_key = key
-
-    if best_key is not None:
-        logger.debug(f"Lookup {name} => best overlap candidate {best_key}")
-        return scores[best_key]
-
-    # Last resort: fall back to the longest single word with a score.
-    scored_words = [c for c in candidates if c in scores]
-    if not scored_words:
-        return DEFAULT_SCORE
-
-    candidate = max(scored_words, key=len)
-    logger.debug(f"Lookup {name} => final candidate {candidate}")
-    return scores[candidate]
-
-
-def update(scores: Scores, name: str, score: float) -> None:
-    """Update score for an item name.
-
-    Args:
-        scores: Score storage
-        name: Item name
-        score: New score
-    """
-    candidates = lookup_candidates(name)
-    # Save score for all words in the item, as well as the full string
-    full_key = ",".join(candidates)
-    for candidate in [full_key] + candidates:
-        scores[candidate] = score
+    return ",".join(lookup_candidates(name))
 
 
 async def order_list(
@@ -292,13 +233,11 @@ async def order_list(
             for checklist_item in checklist.checkItems:
                 logger.debug(f"Processing item: {checklist_item.name}")
                 # Avoid negative pos values
-                pos = int(lookup(scores, checklist_item.name) + 100000)
+                pos = int(scores.lookup(checklist_item.name) + 100000)
 
                 if checklist_item.pos != pos:
                     # Determine if item should have unsorted tag
-                    candidates = lookup_candidates(checklist_item.name)
-                    full_key = ",".join(candidates)
-                    has_score = full_key in scores
+                    has_score = checklist_item.name in scores
                     has_unsorted_tag = bool(UNSORTED_RE.search(checklist_item.name))
 
                     new_name = checklist_item.name
@@ -498,7 +437,7 @@ def train(checklist: Checklist, old_scores: Scores) -> Scores:
     logger.info(f"Training on {len(checklist.checkItems)} items")
 
     # Create new scores dict from old scores
-    scores = make_scores(dict(old_scores))
+    scores = Scores(old_scores.as_dict())
 
     # Create ELO ranking system
     elo = EloRank()
@@ -506,12 +445,12 @@ def train(checklist: Checklist, old_scores: Scores) -> Scores:
     # Snapshot starting ratings so every comparison in this round is judged
     # against the same baseline, regardless of the items' iteration order.
     items = checklist.checkItems
-    starting_scores = {item.name: lookup(scores, item.name) for item in items}
+    starting_scores = {item_key(i.name): scores.lookup(i.name) for i in items}
     deltas: defaultdict[str, float] = defaultdict(float)
 
     # Process each unordered pair of items exactly once
     for i, current in enumerate(items):
-        current_score = starting_scores[current.name]
+        current_score = starting_scores[item_key(current.name)]
 
         for compare in items[i + 1:]:
             # Same object
@@ -519,7 +458,7 @@ def train(checklist: Checklist, old_scores: Scores) -> Scores:
                 continue
 
             # Lower pos means earlier in sequence
-            compare_score = starting_scores[compare.name]
+            compare_score = starting_scores[item_key(compare.name)]
 
             current_expected = elo.get_expected(current_score, compare_score)
             compare_expected = elo.get_expected(compare_score, current_score)
@@ -527,11 +466,16 @@ def train(checklist: Checklist, old_scores: Scores) -> Scores:
             current_actual = 0 if current.pos < compare.pos else 1
             compare_actual = 1 - current_actual
 
-            deltas[current.name] += elo.update_rating(current_expected, current_actual, 0.0)
-            deltas[compare.name] += elo.update_rating(compare_expected, compare_actual, 0.0)
+            deltas[item_key(current.name)] += elo.update_rating(
+                current_expected, current_actual, 0.0
+            )
+            deltas[item_key(compare.name)] += elo.update_rating(
+                compare_expected, compare_actual, 0.0
+            )
 
     for item in items:
-        update(scores, item.name, starting_scores[item.name] + deltas[item.name])
+        key = item_key(item.name)
+        scores.update(item.name, starting_scores[key] + deltas[key])
 
     return scores
 
@@ -562,16 +506,16 @@ async def main() -> None:
     scores_path = Path("scores.json")
     if scores_path.exists():
         scores_data = json.loads(scores_path.read_text())
-        scores = make_scores(scores_data)
+        scores = Scores(scores_data)
     else:
-        scores = make_scores()
+        scores = Scores()
 
     # Train on all checklists
     for checklist in checklists:
         scores = train(checklist, scores)
 
     # Save scores
-    scores_path.write_text(json.dumps(dict(scores), indent=2))
+    scores_path.write_text(json.dumps(scores.as_dict(), indent=2))
 
     # Reset training labels
     await reset_label(
