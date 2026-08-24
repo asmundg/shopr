@@ -1,0 +1,47 @@
+name: Auto-merge PRs
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: startsWith(github.head_ref, 'claude/')
+
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+
+    steps:
+      - name: Wait for tests and merge
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha=$(gh pr view "$PR_URL" --json headRefOid --jq '.headRefOid')
+          for i in $(seq 1 60); do
+            conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" \
+              --jq '[.check_runs[] | select(.name == "test")] | if length > 0 then (.[0].conclusion // "in_progress") else "pending" end')
+            case "$conclusion" in
+              success)
+                echo "Tests passed, merging..."
+                gh pr merge --squash "$PR_URL"
+                exit 0
+                ;;
+              failure|cancelled|timed_out|action_required|skipped)
+                echo "Tests did not pass (conclusion: $conclusion), skipping merge"
+                exit 0
+                ;;
+              *)
+                echo "Waiting for tests... attempt $i/60 (current: $conclusion)"
+                sleep 30
+                ;;
+            esac
+          done
+          echo "Timed out waiting for tests after 30 minutes"
+          exit 1
